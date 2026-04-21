@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# VS Code
+.vscode/
+
+# Environment
+.env
+.env.*
+.venv/
+venv/
+ENV/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# Test
+htmlcov/
+.coverage
+.tox/
+
+# Misc
+*.sqlite3
+*.db
+*.pot
+*.mo
+*.pyo
+*.pyd
+*.swp
+*.bak
+*.tmp
+*.orig
+*.old
+
+# Git
+.git/
+.gitmodules
+
+# Others
+*.pem
+*.key
+*.crt
+*.sublime-workspace
+*.sublime-project
+*.idea/
+*.iml
+*.yarn/
+*.npm/
+
+# Ignore markdown preview artifacts
+*.rendered.md
