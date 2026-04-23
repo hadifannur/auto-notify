@@ -90,12 +90,13 @@ def get_lark_chat_messages_until_tasks_found(user_access_token, chat_id, task_na
         items = data.get("items", [])
         for msg in items:
             content = msg.get("title") or msg.get("body", {}).get("content", "")
-            for task_name in task_names:
-                if task_name not in found and task_name and task_name in content:
-                    results.append((task_name, content))
-                    found.add(task_name)
-                    if len(found) == len(task_names):
-                        break
+            if "Mission Completion" in content:
+                for task_name in task_names:
+                    if task_name not in found and task_name and task_name in content:
+                        results.append((task_name, content))
+                        found.add(task_name)
+                        if len(found) == len(task_names):
+                            break
             if len(found) == len(task_names):
                 break
         has_more = data.get("has_more", False)
@@ -149,9 +150,10 @@ def main():
 		return
 	task_names = []
 	for row in values[1:]:
-		status = row[status_idx] if len(row) > status_idx else ''
+		raw_status = row[status_idx] if len(row) > status_idx else ''
+		status = raw_status.strip() if raw_status is not None else ''
 		name = row[name_idx] if len(row) > name_idx else ''
-		if status == 'POC Round' and name:
+		if (status == 'POC Round' or status == '') and name:
 			task_names.append(name)
 			print(name)
 
