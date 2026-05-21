@@ -62,46 +62,53 @@ def get_sheet_values(sheet_id):
 		raise Exception(f"Error fetching values: {data}")
 	return data['data']['valueRange']['values']
 
-def get_lark_chat_messages_until_tasks_found(user_access_token, chat_id, task_names):
-    """
-    Fetch messages from a Lark chat until all task names are found in messages or messages are exhausted.
-    Returns a list of (task_name, message_content) tuples for matches found.
-    """
-    url = "https://open.larksuite.com/open-apis/im/v1/messages"
-    headers = {
-        "Authorization": f"Bearer {user_access_token}",
-        "Content-Type": "application/json"
-    }
-    params = {
-        "container_id_type": "chat",
-        "container_id": chat_id,
-        "page_size": 50
-    }
-    found = set()
-    results = []
-    has_more = True
-    page_token = None
-    while has_more and len(found) < len(task_names):
-        if page_token:
-            params["page_token"] = page_token
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        data = response.json().get("data", {})
-        items = data.get("items", [])
-        for msg in items:
-            content = msg.get("title") or msg.get("body", {}).get("content", "")
-            if "Mission Completion" in content:
-                for task_name in task_names:
-                    if task_name not in found and task_name and task_name in content:
-                        results.append((task_name, content))
-                        found.add(task_name)
-                        if len(found) == len(task_names):
-                            break
-            if len(found) == len(task_names):
-                break
-        has_more = data.get("has_more", False)
-        page_token = data.get("page_token")
-    return results
+def get_lark_chat_messages_until_tasks_found(user_access_token, chat_id, task_targets):
+	"""
+	Fetch messages from a Lark chat until all task targets are found in messages or messages are exhausted.
+	A task target can match by Task Name/Doc first, then fallback to Extracted/Appeal Doc.
+	Returns a list of (task_label, message_content) tuples for matches found.
+	"""
+	url = "https://open.larksuite.com/open-apis/im/v1/messages"
+	headers = {
+		"Authorization": f"Bearer {user_access_token}",
+		"Content-Type": "application/json"
+	}
+	params = {
+		"container_id_type": "chat",
+		"container_id": chat_id,
+		"page_size": 50
+	}
+	found = set()
+	results = []
+	has_more = True
+	page_token = None
+	while has_more and len(found) < len(task_targets):
+		if page_token:
+			params["page_token"] = page_token
+		response = requests.get(url, headers=headers, params=params)
+		response.raise_for_status()
+		data = response.json().get("data", {})
+		items = data.get("items", [])
+		for msg in items:
+			content = msg.get("title") or msg.get("body", {}).get("content", "")
+			if "Mission Completion" in content:
+				for idx, target in enumerate(task_targets):
+					if idx in found:
+						continue
+					task_name = (target.get("task_name") or "").strip()
+					appeal_doc = (target.get("appeal_doc") or "").strip()
+					is_match = (task_name and task_name in content) or (appeal_doc and appeal_doc in content)
+					if is_match:
+						task_label = task_name or appeal_doc
+						results.append((task_label, content))
+						found.add(idx)
+						if len(found) == len(task_targets):
+							break
+			if len(found) == len(task_targets):
+				break
+		has_more = data.get("has_more", False)
+		page_token = data.get("page_token")
+	return results
 
 def send_qa_notification(token, message, chat_id=None):
     """
@@ -145,17 +152,19 @@ def main():
 	try:
 		status_idx = headers.index('Task Status')
 		name_idx = headers.index('Task Name/Doc')
+		appeal_idx = headers.index('Extracted/Appeal Doc')
 	except ValueError:
 		print("Required columns not found.")
 		return
-	task_names = []
+	task_targets = []
 	for row in values[1:]:
 		raw_status = row[status_idx] if len(row) > status_idx else ''
 		status = raw_status.strip() if raw_status is not None else ''
 		name = row[name_idx] if len(row) > name_idx else ''
-		if (status == 'POC Round' or status == '') and name:
-			task_names.append(name)
-			print(name)
+		appeal_doc = row[appeal_idx] if len(row) > appeal_idx else ''
+		if (status == 'POC Round' or status == '') and (name or appeal_doc):
+			task_targets.append({"task_name": name, "appeal_doc": appeal_doc})
+			print(name or appeal_doc)
 
 
 	def fetch_and_notify():
@@ -165,7 +174,7 @@ def main():
 		if user_access_token and chat_id:
 			print("\n--- Lark Chat Messages containing Task Names ---")
 			try:
-				results = get_lark_chat_messages_until_tasks_found(user_access_token, chat_id, task_names)
+				results = get_lark_chat_messages_until_tasks_found(user_access_token, chat_id, task_targets)
 				print(f"Total matches found: {len(results)}")
 				for task_name, content in results:
 					print(task_name)
@@ -177,7 +186,7 @@ def main():
 						+ "\n\nPlease check and update accordingly."
 					)
 				else:
-					summary = "No POC Round tasks found in chat messages."
+					summary = "All tasks has been updated"
 				# Use tenant access token for group notification
 				group_token = get_tenant_access_token()
 				send_qa_notification(group_token, summary)
