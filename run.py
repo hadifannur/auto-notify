@@ -3,6 +3,7 @@ import requests
 from dotenv import load_dotenv
 import subprocess
 import json
+from datetime import datetime, timezone
 
 load_dotenv()
 
@@ -14,6 +15,16 @@ QA_CHAT_ID = os.getenv('QA_CHAT_ID').strip("'")
 
 BASE_URL = 'https://open.feishu.cn/open-apis/sheets/v3/spreadsheets'
 BASE_URL_V2 = 'https://open.feishu.cn/open-apis/sheets/v2/spreadsheets'
+
+
+def column_index_to_letter(col_idx):
+	"""Convert 0-based column index to spreadsheet column letters (A, B, ..., AA)."""
+	col_num = col_idx + 1
+	letters = ""
+	while col_num > 0:
+		col_num, rem = divmod(col_num - 1, 26)
+		letters = chr(65 + rem) + letters
+	return letters
 
 def get_tenant_access_token():
     url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
@@ -62,11 +73,41 @@ def get_sheet_values(sheet_id):
 		raise Exception(f"Error fetching values: {data}")
 	return data['data']['valueRange']['values']
 
+
+def batch_update_task_status(sheet_id, status_col_idx, row_numbers, new_status):
+	"""Update Task Status for multiple rows in a single API request."""
+	if not row_numbers:
+		return
+
+	status_col = column_index_to_letter(status_col_idx)
+	unique_rows = sorted(set(row_numbers))
+	value_ranges = [
+		{
+			"range": f"{sheet_id}!{status_col}{row}:{status_col}{row}",
+			"values": [[new_status]],
+		}
+		for row in unique_rows
+	]
+
+	url = f"{BASE_URL_V2}/{SPREADSHEET_TOKEN}/values_batch_update"
+	resp = requests.post(url, headers=get_headers(), json={"valueRanges": value_ranges})
+	try:
+		resp.raise_for_status()
+	except requests.HTTPError:
+		print("API Error Response:")
+		print(resp.text)
+		raise
+	data = resp.json()
+	if data.get('code') != 0:
+		print("API Error Response:")
+		print(data)
+		raise Exception(f"Error updating statuses: {data}")
+
 def get_lark_chat_messages_until_tasks_found(user_access_token, chat_id, task_targets):
 	"""
 	Fetch messages from a Lark chat until all task targets are found in messages or messages are exhausted.
 	A task target can match by Task Name/Doc first, then fallback to Extracted/Appeal Doc.
-	Returns a list of (task_label, message_content) tuples for matches found.
+	Returns a list of matched task dictionaries for matches found.
 	"""
 	url = "https://open.larksuite.com/open-apis/im/v1/messages"
 	headers = {
@@ -97,10 +138,25 @@ def get_lark_chat_messages_until_tasks_found(user_access_token, chat_id, task_ta
 						continue
 					task_name = (target.get("task_name") or "").strip()
 					appeal_doc = (target.get("appeal_doc") or "").strip()
-					is_match = (task_name and task_name in content) or (appeal_doc and appeal_doc in content)
-					if is_match:
+					matched_by = None
+					if task_name and task_name in content:
+						matched_by = "task_name"
+					elif appeal_doc and appeal_doc in content:
+						matched_by = "appeal_doc"
+					if matched_by:
 						task_label = task_name or appeal_doc
-						results.append((task_label, content))
+						raw_ts = msg.get("create_time", "")
+						try:
+							completed_date = datetime.fromtimestamp(int(raw_ts) / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+						except (ValueError, TypeError):
+							completed_date = ""
+						results.append({
+							"task_label": task_label,
+							"row_number": target.get("row_number"),
+							"matched_by": matched_by,
+							"completed_date": completed_date,
+							"content": content,
+						})
 						found.add(idx)
 						if len(found) == len(task_targets):
 							break
@@ -156,14 +212,15 @@ def main():
 	except ValueError:
 		print("Required columns not found.")
 		return
+	date_idx = headers.index('POC End Date') if 'POC End Date' in headers else None
 	task_targets = []
-	for row in values[1:]:
+	for row_idx, row in enumerate(values[1:], start=2):
 		raw_status = row[status_idx] if len(row) > status_idx else ''
 		status = raw_status.strip() if raw_status is not None else ''
 		name = row[name_idx] if len(row) > name_idx else ''
 		appeal_doc = row[appeal_idx] if len(row) > appeal_idx else ''
 		if (status == 'POC Round' or status == '') and (name or appeal_doc):
-			task_targets.append({"task_name": name, "appeal_doc": appeal_doc})
+			task_targets.append({"task_name": name, "appeal_doc": appeal_doc, "row_number": row_idx})
 			print(name or appeal_doc)
 
 
@@ -176,13 +233,39 @@ def main():
 			try:
 				results = get_lark_chat_messages_until_tasks_found(user_access_token, chat_id, task_targets)
 				print(f"Total matches found: {len(results)}")
-				for task_name, content in results:
-					print(task_name)
+				for match in results:
+					print(f"{match['task_label']} (completed: {match.get('completed_date', 'unknown')})")
+
+				completed_rows = [match["row_number"] for match in results if match.get("row_number")]
+				if completed_rows:
+					batch_update_task_status(
+						SHEET_ID,
+						status_idx,
+						completed_rows,
+						'Appeal Need To Be Released',
+					)
+					print(f"Updated Task Status for {len(set(completed_rows))} row(s).")
+				if date_idx is not None:
+					date_value_ranges = [
+						{
+							"range": f"{SHEET_ID}!{column_index_to_letter(date_idx)}{match['row_number']}:{column_index_to_letter(date_idx)}{match['row_number']}",
+							"values": [[match.get("completed_date", "")]],
+						}
+						for match in results if match.get("row_number") and match.get("completed_date")
+					]
+					if date_value_ranges:
+						url = f"{BASE_URL_V2}/{SPREADSHEET_TOKEN}/values_batch_update"
+						resp = requests.post(url, headers=get_headers(), json={"valueRanges": date_value_ranges})
+						resp.raise_for_status()
+						print(f"Updated Completed Date for {len(date_value_ranges)} row(s).")
 				# Send notification to group with summary
 				if results:
 					summary = (
 						"**The following tasks have been found to be completed in the POC Round:**\n\n"
-						+ "\n".join(f"{task_name}" for task_name, _ in results)
+						+ "\n".join(
+							f"{match['task_label']} (completed: {match.get('completed_date', 'unknown')})"
+							for match in results
+						)
 						+ "\n\nPlease check and update accordingly."
 					)
 				else:
