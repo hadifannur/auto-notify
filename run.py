@@ -196,6 +196,17 @@ def send_qa_notification(token, message, chat_id=None):
     except Exception as e:
         print(f"  ERROR: Failed to send notification: {e}")
 
+
+def date_to_sheet_serial(date_str):
+    """Convert a YYYY-MM-DD date string to spreadsheet serial number."""
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
+    origin = datetime(1899, 12, 30).date()
+    return float((dt - origin).days)
+
+
 def main():
 	if not SHEET_ID:
 		print("SHEET_ID not set in .env")
@@ -206,20 +217,20 @@ def main():
 		return
 	headers = values[0]
 	try:
-		status_idx = headers.index('Task Status')
 		name_idx = headers.index('Task Name/Doc')
 		appeal_idx = headers.index('Extracted/Appeal Doc')
+		date_idx = headers.index('POC End Date')
+		extended_idx = headers.index('Investigating Extended Hours')
 	except ValueError:
 		print("Required columns not found.")
 		return
-	date_idx = headers.index('POC End Date') if 'POC End Date' in headers else None
 	task_targets = []
 	for row_idx, row in enumerate(values[1:], start=2):
-		raw_status = row[status_idx] if len(row) > status_idx else ''
-		status = raw_status.strip() if raw_status is not None else ''
+		date_value = row[date_idx] if len(row) > date_idx else ''
+		extended_value = row[extended_idx] if len(row) > extended_idx else ''
 		name = row[name_idx] if len(row) > name_idx else ''
 		appeal_doc = row[appeal_idx] if len(row) > appeal_idx else ''
-		if (status == 'POC Round' or status == '') and (name or appeal_doc):
+		if (not date_value or str(date_value).strip() == '') and (not extended_value or str(extended_value).strip() == '') and (name or appeal_doc):
 			task_targets.append({"task_name": name, "appeal_doc": appeal_doc, "row_number": row_idx})
 			print(name or appeal_doc)
 
@@ -236,23 +247,18 @@ def main():
 				for match in results:
 					print(f"{match['task_label']} (completed: {match.get('completed_date', 'unknown')})")
 
-				completed_rows = [match["row_number"] for match in results if match.get("row_number")]
-				if completed_rows:
-					batch_update_task_status(
-						SHEET_ID,
-						status_idx,
-						completed_rows,
-						'Appeal Need To Be Released',
-					)
-					print(f"Updated Task Status for {len(set(completed_rows))} row(s).")
 				if date_idx is not None:
-					date_value_ranges = [
-						{
-							"range": f"{SHEET_ID}!{column_index_to_letter(date_idx)}{match['row_number']}:{column_index_to_letter(date_idx)}{match['row_number']}",
-							"values": [[match.get("completed_date", "")]],
-						}
-						for match in results if match.get("row_number") and match.get("completed_date")
-					]
+					date_value_ranges = []
+					for match in results:
+						completed_date = match.get("completed_date")
+						serial = date_to_sheet_serial(completed_date)
+						if match.get("row_number") and serial is not None:
+							date_value_ranges.append(
+								{
+									"range": f"{SHEET_ID}!{column_index_to_letter(date_idx)}{match['row_number']}:{column_index_to_letter(date_idx)}{match['row_number']}",
+									"values": [[serial]],
+								}
+						)
 					if date_value_ranges:
 						url = f"{BASE_URL_V2}/{SPREADSHEET_TOKEN}/values_batch_update"
 						resp = requests.post(url, headers=get_headers(), json={"valueRanges": date_value_ranges})
